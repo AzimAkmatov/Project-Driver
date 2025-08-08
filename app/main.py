@@ -1,41 +1,43 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.routes import ping
-from app import models, schemas, database, utils
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 
+from app import models, schemas, database, utils
+from app.routes import ping, staff
+
 app = FastAPI()
 app.include_router(ping.router)
+app.include_router(staff.router)
 
-# Dependency
+# Dependencies
 get_db = database.get_db
-
-# Password Hashing + JWT Config
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-SECRET_KEY = "your-secret-key"  # ❗Replace with a real secret before prod
+# CEO JWT Config
+SECRET_KEY = "your-secret-key"  # ❗ Replace for production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
+# Staff JWT Config
+STAFF_SECRET_KEY = "staff-secret-key"  # ❗ Replace for production
+
 # OAuth2
 oauth2_scheme = HTTPBearer()
-
 
 # Helpers
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
-def create_access_token(data: dict, expires_delta: timedelta = None):
+def create_access_token(data: dict, secret_key: str, expires_delta: timedelta = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(to_encode, secret_key, algorithm=ALGORITHM)
 
-
-# 📝 Register a Company
+# CEO Registration
 @app.post("/register")
 def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_db)):
     existing = db.query(models.Company).filter(models.Company.email == company.email).first()
@@ -43,7 +45,6 @@ def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_d
         raise HTTPException(status_code=400, detail="Email already registered")
 
     hashed_pw = utils.hash_password(company.password)
-
     new_company = models.Company(
         name=company.name,
         email=company.email,
@@ -56,23 +57,18 @@ def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_d
 
     return {"message": "Company registered successfully", "company_id": new_company.id}
 
-
-# 🔐 Login
+# CEO Login
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     company = db.query(models.Company).filter(models.Company.email == form_data.username).first()
     if not company or not verify_password(form_data.password, company.password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
-    access_token = create_access_token(data={"sub": str(company.id)})
+    access_token = create_access_token(data={"sub": str(company.id)}, secret_key=SECRET_KEY)
     return {"access_token": access_token, "token_type": "bearer"}
 
-
-# 👤 Get Current Company
-def get_current_company(
-    token: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
+# Get current company (CEO)
+def get_current_company(token: HTTPAuthorizationCredentials = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid authentication credentials",
@@ -91,8 +87,7 @@ def get_current_company(
         raise credentials_exception
     return company
 
-
-# 🧾 Authenticated Company Info
+# Get CEO profile
 @app.get("/company/me")
 def read_company_me(current_company: models.Company = Depends(get_current_company)):
     return {
@@ -102,41 +97,37 @@ def read_company_me(current_company: models.Company = Depends(get_current_compan
         "address": current_company.address
     }
 
+# Invite Staff
 @app.post("/invite-user")
-def invite_user(
-    user: schemas.InviteUser,
-    db: Session = Depends(get_db),
-    current_company: models.Company = Depends(get_current_company)
-):
+def invite_user(user: schemas.InviteUser, db: Session = Depends(get_db), current_company: models.Company = Depends(get_current_company)):
     allowed_departments = {"dispatch", "hr", "safety", "accountant", "fleet_manager"}
 
     if user.department not in allowed_departments:
         raise HTTPException(status_code=400, detail="Invalid department")
 
-    # Check if department already exists under this company
     existing = db.query(models.User).filter_by(company_id=current_company.id, department=user.department).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"{user.department} already exists in your company")
-    from app.utils import hash_password
-    hashed_pw = hash_password("changeme123")  # Default password
+
+    hashed_pw = utils.hash_password("changeme123")  # Default password
     new_user = models.User(
         name=user.name,
         email=user.email,
         password=hashed_pw,
         department=user.department,
         company_id=current_company.id
-)
+    )
 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    return {"message": f"{user.department} invited successfully", "user_id": new_user.id}
+    return {"message": f"{user.department} invited successfully", "user_id": new_user.id, "default_password": "changeme123"}
 
+# List Staff Users
 @app.get("/company/staff")
 def get_company_staff(current_company: models.Company = Depends(get_current_company), db: Session = Depends(get_db)):
     staff = db.query(models.User).filter(models.User.company_id == current_company.id).all()
-    
     return [
         {
             "id": user.id,
@@ -147,32 +138,12 @@ def get_company_staff(current_company: models.Company = Depends(get_current_comp
         for user in staff
     ]
 
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
-from jose import jwt
-from datetime import timedelta
-
-# Reuse from CEO logic
-from app import database, models, utils
-
-STAFF_SECRET_KEY = "staff-secret-key"  # Set a different key from CEO
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
+# Staff Login
 @app.post("/staff-login")
-def staff_login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(database.get_db)):
+def staff_login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     staff_user = db.query(models.User).filter(models.User.email == form_data.username).first()
     if not staff_user or not utils.verify_password(form_data.password, staff_user.password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
-    access_token = jwt.encode(
-        {"sub": str(staff_user.id)},
-        STAFF_SECRET_KEY,
-        algorithm=ALGORITHM
-    )
-
+    access_token = create_access_token(data={"sub": str(staff_user.id)}, secret_key=STAFF_SECRET_KEY)
     return {"access_token": access_token, "token_type": "bearer"}
-from app.routes import staff
-
-app.include_router(staff.router)
