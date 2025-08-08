@@ -25,3 +25,15 @@ class User(Base):
     company_id = Column(Integer, ForeignKey("companies.id"))
 
     company = relationship("Company", back_populates="users")
+
+class Driver(Base):
+    __tablename__ = "drivers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    dob = Column(Date, index=True)
+    license_number = Column(String, unique=True, index=True)
+    created_by_company_id = Column(Integer, ForeignKey("companies.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    company = relationship("Company")

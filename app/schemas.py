@@ -11,3 +11,17 @@ class InviteUser(BaseModel):
     name: str
     email: EmailStr
     department: str
+    
+class DriverCreate(BaseModel):
+    name: str
+    dob: date
+    license_number: str
+
+class DriverResponse(BaseModel):
+    id: int
+    name: str
+    dob: date
+    license_number: str
+
+    class Config:
+        orm_mode = True
