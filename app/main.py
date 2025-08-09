@@ -12,10 +12,11 @@ from . import models, schemas, utils
 from .database import get_db, Base, engine
 from .routes import ping, staff
 from .auth import get_current_staff_user as get_current_staff
+from .core.settings import settings
 
-# JWT and Password Setup
-SECRET_KEY = "your-secret-key"        # ⚠️ Replace for production
-STAFF_SECRET_KEY = "staff-secret-key" # ⚠️ Replace for production
+SECRET_KEY = settings.SECRET_KEY
+STAFF_SECRET_KEY = settings.STAFF_SECRET_KEY
+DATABASE_URL = settings.DATABASE_URL
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -242,7 +243,10 @@ def get_driver_ratings(
         raise HTTPException(status_code=404, detail="Driver not found")
     return driver.ratings
 
-# ------------------ INIT DB ------------------
+#Silence favicon
+from fastapi import Response
 
-# Importing models above already registers them with Base, so this will create tables:
-Base.metadata.create_all(bind=engine)
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
