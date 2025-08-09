@@ -250,3 +250,11 @@ from fastapi import Response
 def favicon():
     return Response(status_code=204)
 
+#Create tables at startup
+from .database import Base, engine
+
+from .database import Base, engine
+
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(bind=engine)

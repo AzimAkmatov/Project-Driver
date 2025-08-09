@@ -1,16 +1,12 @@
+# app/database.py
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy_utils import database_exists, create_database 
+from .core.settings import settings
 
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/driver_rating"
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL  # must be the postgres URL
 
-# Create DB if it doesn't exist
-if not database_exists(DATABASE_URL):
-    create_database(DATABASE_URL)
-
-engine = create_engine(DATABASE_URL)
+engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 Base = declarative_base()
 
 def get_db():
