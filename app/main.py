@@ -26,6 +26,16 @@ oauth2_scheme = HTTPBearer()
 app = FastAPI()
 app.include_router(ping.router)
 app.include_router(staff.router)
+#Docker part for FrontEnd
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ------------------ UTILS ------------------
 
