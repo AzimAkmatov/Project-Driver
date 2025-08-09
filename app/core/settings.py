@@ -1,11 +1,16 @@
-from pydantic import BaseSettings
+# app/core/settings.py
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    SECRET_KEY: str
-    STAFF_SECRET_KEY: str
-    DATABASE_URL: str
+    SECRET_KEY: str = "dev-change-me"
+    STAFF_SECRET_KEY: str = "dev-change-me-staff"
+    DATABASE_URL: str = "sqlite:///./driver.sqlite3"
 
-    class Config:
-        env_file = ".env"
+    # pydantic v2-style config
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 settings = Settings()
