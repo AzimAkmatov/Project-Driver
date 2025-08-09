@@ -1,17 +1,21 @@
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone, date
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from app import models, schemas, database, utils
-from app.database import get_db
-from app.routes import ping, staff
+
+# Local (package-relative) imports — avoid rebinding "app"
+from . import models, schemas, utils
+from .database import get_db, Base, engine
+from .routes import ping, staff
+from .auth import get_current_staff_user as get_current_staff
 
 # JWT and Password Setup
-SECRET_KEY = "your-secret-key"  # ⚠️ Replace for production
-STAFF_SECRET_KEY = "staff-secret-key"  # ⚠️ Replace for production
+SECRET_KEY = "your-secret-key"        # ⚠️ Replace for production
+STAFF_SECRET_KEY = "staff-secret-key" # ⚠️ Replace for production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -24,13 +28,7 @@ app.include_router(staff.router)
 
 # ------------------ UTILS ------------------
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-def create_access_token(data: dict, secret_key: str, expires_delta: timedelta = None):
+def create_access_token(data: dict, secret_key: str, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
@@ -38,7 +36,10 @@ def create_access_token(data: dict, secret_key: str, expires_delta: timedelta = 
 
 # ------------------ AUTH HELPERS ------------------
 
-def get_current_company(token: HTTPAuthorizationCredentials = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_current_company(
+    token: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid authentication credentials",
@@ -46,7 +47,8 @@ def get_current_company(token: HTTPAuthorizationCredentials = Depends(oauth2_sch
     )
     try:
         payload = jwt.decode(token.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        company_id: int = int(payload.get("sub"))
+        company_id_raw = payload.get("sub")
+        company_id: int | None = int(company_id_raw) if company_id_raw is not None else None
         if company_id is None:
             raise credentials_exception
     except JWTError:
@@ -56,8 +58,6 @@ def get_current_company(token: HTTPAuthorizationCredentials = Depends(oauth2_sch
     if company is None:
         raise credentials_exception
     return company
-
-from app.auth import get_current_staff_user as get_current_staff
 
 # ------------------ CEO ROUTES ------------------
 
@@ -72,7 +72,7 @@ def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_d
         name=company.name,
         email=company.email,
         password=hashed_pw,
-        address=company.address
+        address=company.address,
     )
     db.add(new_company)
     db.commit()
@@ -83,7 +83,7 @@ def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_d
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     company = db.query(models.Company).filter(models.Company.email == form_data.username).first()
-    if not company or not verify_password(form_data.password, company.password):
+    if not company or not utils.verify_password(form_data.password, company.password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
     access_token = create_access_token(data={"sub": str(company.id)}, secret_key=SECRET_KEY)
@@ -95,11 +95,15 @@ def read_company_me(current_company: models.Company = Depends(get_current_compan
         "id": current_company.id,
         "name": current_company.name,
         "email": current_company.email,
-        "address": current_company.address
+        "address": current_company.address,
     }
 
 @app.post("/invite-user")
-def invite_user(user: schemas.InviteUser, db: Session = Depends(get_db), current_company: models.Company = Depends(get_current_company)):
+def invite_user(
+    user: schemas.InviteUser,
+    db: Session = Depends(get_db),
+    current_company: models.Company = Depends(get_current_company),
+):
     allowed_departments = {"dispatch", "hr", "safety", "accountant", "fleet_manager"}
 
     if user.department not in allowed_departments:
@@ -115,26 +119,28 @@ def invite_user(user: schemas.InviteUser, db: Session = Depends(get_db), current
         email=user.email,
         password=hashed_pw,
         department=user.department,
-        company_id=current_company.id
+        company_id=current_company.id,
     )
 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    return {"message": f"{user.department} invited successfully", "user_id": new_user.id, "default_password": "changeme123"}
+    return {
+        "message": f"{user.department} invited successfully",
+        "user_id": new_user.id,
+        "default_password": "changeme123",
+    }
 
 @app.get("/company/staff")
-def get_company_staff(current_company: models.Company = Depends(get_current_company), db: Session = Depends(get_db)):
-    staff = db.query(models.User).filter(models.User.company_id == current_company.id).all()
+def get_company_staff(
+    current_company: models.Company = Depends(get_current_company),
+    db: Session = Depends(get_db),
+):
+    staff_users = db.query(models.User).filter(models.User.company_id == current_company.id).all()
     return [
-        {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email,
-            "department": user.department
-        }
-        for user in staff
+        {"id": u.id, "name": u.name, "email": u.email, "department": u.department}
+        for u in staff_users
     ]
 
 # ------------------ STAFF ROUTES ------------------
@@ -151,7 +157,11 @@ def staff_login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
 # ------------------ DRIVER MANAGEMENT ------------------
 
 @app.post("/drivers", response_model=schemas.DriverResponse)
-def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db), current_user=Depends(get_current_company)):
+def create_driver(
+    driver: schemas.DriverCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_company),
+):
     existing = db.query(models.Driver).filter(models.Driver.license_number == driver.license_number).first()
     if existing:
         raise HTTPException(status_code=400, detail="Driver already exists")
@@ -160,7 +170,7 @@ def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db), c
         name=driver.name,
         dob=driver.dob,
         license_number=driver.license_number,
-        created_by_company_id=current_user.id
+        created_by_company_id=current_user.id,
     )
     db.add(new_driver)
     db.commit()
@@ -168,7 +178,12 @@ def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db), c
     return new_driver
 
 @app.get("/drivers/search", response_model=List[schemas.DriverResponse])
-def search_drivers(name: str = "", dob: Optional[date] = None, db: Session = Depends(get_db), current_user=Depends(get_current_company)):
+def search_drivers(
+    name: str = "",
+    dob: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_company),
+):
     query = db.query(models.Driver).filter(models.Driver.created_by_company_id == current_user.id)
 
     if name:
@@ -179,7 +194,11 @@ def search_drivers(name: str = "", dob: Optional[date] = None, db: Session = Dep
     return query.all()
 
 @app.get("/drivers/{driver_id}", response_model=schemas.DriverResponse)
-def get_driver(driver_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_company)):
+def get_driver(
+    driver_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_company),
+):
     driver = db.query(models.Driver).filter_by(id=driver_id, created_by_company_id=current_user.id).first()
     if not driver:
         raise HTTPException(status_code=404, detail="Driver not found")
@@ -188,7 +207,11 @@ def get_driver(driver_id: int, db: Session = Depends(get_db), current_user=Depen
 # ------------------ DRIVER RATING ------------------
 
 @app.post("/ratings", response_model=schemas.DriverRatingResponse)
-def rate_driver(rating: schemas.DriverRatingCreate, db: Session = Depends(get_db), current_user=Depends(get_current_staff)):
+def rate_driver(
+    rating: schemas.DriverRatingCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_staff),
+):
     driver = db.query(models.Driver).filter(models.Driver.id == rating.driver_id).first()
     if not driver:
         raise HTTPException(status_code=404, detail="Driver not found")
@@ -209,14 +232,17 @@ def rate_driver(rating: schemas.DriverRatingCreate, db: Session = Depends(get_db
     return new_rating
 
 @app.get("/drivers/{driver_id}/ratings", response_model=List[schemas.DriverRatingResponse])
-def get_driver_ratings(driver_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_company)):
+def get_driver_ratings(
+    driver_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_company),
+):
     driver = db.query(models.Driver).filter_by(id=driver_id, created_by_company_id=current_user.id).first()
     if not driver:
         raise HTTPException(status_code=404, detail="Driver not found")
     return driver.ratings
 
 # ------------------ INIT DB ------------------
-from app.database import Base, engine
-import app.models
 
+# Importing models above already registers them with Base, so this will create tables:
 Base.metadata.create_all(bind=engine)
