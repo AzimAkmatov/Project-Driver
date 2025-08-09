@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from . import models
-from .core.settings import settings  # ✅ use shared settings
+from .core.settings import settings
 
 oauth2_scheme = HTTPBearer()
 ALGORITHM = "HS256"
@@ -16,7 +16,7 @@ def get_current_staff_user(
     db: Session = Depends(get_db),
 ):
     try:
-        payload = jwt.decode(token.credentials, settings.STAFF_SECRET_KEY, algorithms=[ALGORITHM])  # ✅ same key
+        payload = jwt.decode(token.credentials, settings.STAFF_SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload.get("sub"))
     except (JWTError, ValueError, TypeError):
         raise HTTPException(
