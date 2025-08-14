@@ -1,0 +1,28 @@
+name: backend
+on:
+  push: { branches: [ main ] }
+  workflow_dispatch:
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-2
+      - name: Build & push image
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR="$ACCOUNT_ID.dkr.ecr.us-east-2.amazonaws.com"
+          aws ecr describe-repositories --repository-names project-driver-api || aws ecr create-repository --repository-name project-driver-api
+          docker build -t project-driver-api:main -f backend/Dockerfile .
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR"
+          docker tag project-driver-api:main "$ECR/project-driver-api:main"
+          docker push "$ECR/project-driver-api:main"
+      # add deploy to ECS after infra exists
