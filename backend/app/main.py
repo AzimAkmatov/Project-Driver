@@ -1,52 +1,51 @@
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone, date
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-# Local (package-relative) imports — avoid rebinding "app"
+# Local imports
 from . import models, schemas, utils
-from .database import get_db, Base, engine
 from .routes import ping, staff
 from .auth import get_current_staff_user as get_current_staff
-from .core.settings import settings
+from .core.security import settings  # has SECRET_KEY, STAFF_SECRET_KEY, DATABASE_URL, CORS_ORIGINS
+from .db.session import get_db, engine
+from .db.base import Base
 
-SECRET_KEY = settings.SECRET_KEY
-STAFF_SECRET_KEY = settings.STAFF_SECRET_KEY
-DATABASE_URL = settings.DATABASE_URL
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = HTTPBearer()
 
+
 # FastAPI app
 app = FastAPI()
 app.include_router(ping.router)
 app.include_router(staff.router)
-#Docker part for FrontEnd
-from fastapi.middleware.cors import CORSMiddleware
 
+# ----- CORS (env-driven) -----
+# e.g. CORS_ORIGINS="http://localhost:5173,https://driver.post312.com"
+origins = [o.strip() for o in getattr(settings, "CORS_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ------------------ UTILS ------------------
-
-def create_access_token(data: dict, secret_key: str, expires_delta: timedelta | None = None) -> str:
+# ----- Utils -----
+def create_access_token(data: dict, secret_key: str, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, secret_key, algorithm=ALGORITHM)
 
-# ------------------ AUTH HELPERS ------------------
-
+# ----- Auth helpers -----
 def get_current_company(
     token: HTTPAuthorizationCredentials = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
@@ -57,9 +56,9 @@ def get_current_company(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token.credentials, settings.SECRET_KEY, algorithms=[ALGORITHM])
         company_id_raw = payload.get("sub")
-        company_id: int | None = int(company_id_raw) if company_id_raw is not None else None
+        company_id: Optional[int] = int(company_id_raw) if company_id_raw is not None else None
         if company_id is None:
             raise credentials_exception
     except JWTError:
@@ -70,14 +69,12 @@ def get_current_company(
         raise credentials_exception
     return company
 
-# ------------------ CEO ROUTES ------------------
-
+# ----- CEO routes -----
 @app.post("/register")
 def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_db)):
     existing = db.query(models.Company).filter(models.Company.email == company.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-
     hashed_pw = utils.hash_password(company.password)
     new_company = models.Company(
         name=company.name,
@@ -88,7 +85,6 @@ def register_company(company: schemas.CompanyCreate, db: Session = Depends(get_d
     db.add(new_company)
     db.commit()
     db.refresh(new_company)
-
     return {"message": "Company registered successfully", "company_id": new_company.id}
 
 @app.post("/login")
@@ -96,8 +92,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     company = db.query(models.Company).filter(models.Company.email == form_data.username).first()
     if not company or not utils.verify_password(form_data.password, company.password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
-
-    access_token = create_access_token(data={"sub": str(company.id)}, secret_key=SECRET_KEY)
+    access_token = create_access_token(data={"sub": str(company.id)}, secret_key=settings.SECRET_KEY)
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/company/me")
@@ -116,7 +111,6 @@ def invite_user(
     current_company: models.Company = Depends(get_current_company),
 ):
     allowed_departments = {"dispatch", "hr", "safety", "accountant", "fleet_manager"}
-
     if user.department not in allowed_departments:
         raise HTTPException(status_code=400, detail="Invalid department")
 
@@ -124,24 +118,20 @@ def invite_user(
     if existing:
         raise HTTPException(status_code=400, detail=f"{user.department} already exists in your company")
 
-    hashed_pw = utils.hash_password("changeme123")  # Default password
+    # TODO: replace with one-time invite token flow in production
+    hashed_pw = utils.hash_password("changeme123")
     new_user = models.User(
         name=user.name,
         email=user.email,
         password=hashed_pw,
         department=user.department,
         company_id=current_company.id,
+        must_reset_password=True,  # add this column if not present
     )
-
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-
-    return {
-        "message": f"{user.department} invited successfully",
-        "user_id": new_user.id,
-        "default_password": "changeme123",
-    }
+    return {"message": f"{user.department} invited", "user_id": new_user.id, "default_password": "changeme123"}
 
 @app.get("/company/staff")
 def get_company_staff(
@@ -149,24 +139,18 @@ def get_company_staff(
     db: Session = Depends(get_db),
 ):
     staff_users = db.query(models.User).filter(models.User.company_id == current_company.id).all()
-    return [
-        {"id": u.id, "name": u.name, "email": u.email, "department": u.department}
-        for u in staff_users
-    ]
+    return [{"id": u.id, "name": u.name, "email": u.email, "department": u.department} for u in staff_users]
 
-# ------------------ STAFF ROUTES ------------------
-
+# ----- Staff routes -----
 @app.post("/staff-login")
 def staff_login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     staff_user = db.query(models.User).filter(models.User.email == form_data.username).first()
     if not staff_user or not utils.verify_password(form_data.password, staff_user.password):
         raise HTTPException(status_code=400, detail="Invalid email or password")
-
-    access_token = create_access_token(data={"sub": str(staff_user.id)}, secret_key=STAFF_SECRET_KEY)
+    access_token = create_access_token(data={"sub": str(staff_user.id)}, secret_key=settings.STAFF_SECRET_KEY)
     return {"access_token": access_token, "token_type": "bearer"}
 
-# ------------------ DRIVER MANAGEMENT ------------------
-
+# ----- Driver management -----
 @app.post("/drivers", response_model=schemas.DriverResponse)
 def create_driver(
     driver: schemas.DriverCreate,
@@ -176,7 +160,6 @@ def create_driver(
     existing = db.query(models.Driver).filter(models.Driver.license_number == driver.license_number).first()
     if existing:
         raise HTTPException(status_code=400, detail="Driver already exists")
-
     new_driver = models.Driver(
         name=driver.name,
         dob=driver.dob,
@@ -192,17 +175,17 @@ def create_driver(
 def search_drivers(
     name: str = "",
     dob: Optional[date] = None,
+    limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_company),
 ):
-    query = db.query(models.Driver).filter(models.Driver.created_by_company_id == current_user.id)
-
+    q = db.query(models.Driver).filter(models.Driver.created_by_company_id == current_user.id)
     if name:
-        query = query.filter(models.Driver.name.ilike(f"%{name}%"))
+        q = q.filter(models.Driver.name.ilike(f"%{name}%"))
     if dob:
-        query = query.filter(models.Driver.dob == dob)
-
-    return query.all()
+        q = q.filter(models.Driver.dob == dob)
+    return q.offset(offset).limit(limit).all()
 
 @app.get("/drivers/{driver_id}", response_model=schemas.DriverResponse)
 def get_driver(
@@ -215,8 +198,7 @@ def get_driver(
         raise HTTPException(status_code=404, detail="Driver not found")
     return driver
 
-# ------------------ DRIVER RATING ------------------
-
+# ----- Driver rating -----
 @app.post("/ratings", response_model=schemas.DriverRatingResponse)
 def rate_driver(
     rating: schemas.DriverRatingCreate,
@@ -226,7 +208,6 @@ def rate_driver(
     driver = db.query(models.Driver).filter(models.Driver.id == rating.driver_id).first()
     if not driver:
         raise HTTPException(status_code=404, detail="Driver not found")
-
     if driver.created_by_company_id != current_user.company_id:
         raise HTTPException(status_code=403, detail="You can only rate drivers from your company")
 
@@ -253,18 +234,16 @@ def get_driver_ratings(
         raise HTTPException(status_code=404, detail="Driver not found")
     return driver.ratings
 
-#Silence favicon
-from fastapi import Response
+# ----- Health & misc -----
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    return {"ok": True}
 
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return Response(status_code=204)
 
-#Create tables at startup
-from .database import Base, engine
-
-from .database import Base, engine
-
 @app.on_event("startup")
 def on_startup():
+    # Dev only: prefer Alembic migrations in AWS
     Base.metadata.create_all(bind=engine)
